@@ -241,9 +241,10 @@ export default class ParchmentMap {
     const tick = () => {
       this._rafId = requestAnimationFrame(tick);
       const isMoving = this._isTokenAnimating();
-      if (this.dirty || isMoving) {
+      const isLooking = !!this.gs.isLooking;
+      if (this.dirty || isMoving || isLooking) {
         this._render();
-        if (!isMoving) this.dirty = false;
+        if (!isMoving && !isLooking) this.dirty = false;
       }
     };
     this._rafId = requestAnimationFrame(tick);
@@ -508,10 +509,17 @@ export default class ParchmentMap {
 
   // ─── View cone ──────────────────────────────────────
 
+  _getCameraYawAngle() {
+    // Party-direction angle (lerped during turns) plus the free-look offset.
+    // Note: camYawOffset uses Three.js convention (rotation around +Y, CCW from above),
+    // while the minimap uses screen convention (CW from north). They're opposite, so subtract.
+    return this._getTokenDirAngle() - (this.gs.camYawOffset || 0);
+  }
+
   _drawViewCone(ctx, cp, t) {
     const [tx, tz] = this._getTokenPos();
     const [cx, cy] = this._gridToScreen(tx + 0.5, tz + 0.5);
-    const dirAngle = this._getTokenDirAngle();
+    const dirAngle = this._getCameraYawAngle();
     const fovHalf = (70 / 2) * (Math.PI / 180);
     const coneLen = cp * 6;
 

@@ -9,6 +9,7 @@ const gameState = {
 
   // Three.js objects (set during App.jsx init)
   camera: null,
+  hudChevron: null,
   torchLight: null,
   scene: null,
   renderer: null,
@@ -20,6 +21,11 @@ const gameState = {
   prevPx: 1, prevPz: 5, prevDir: 0,
   moveStartTime: 0,
   moveDuration: 0,
+
+  // Free-look camera offsets (relative to party direction)
+  camYawOffset: 0,    // radians, added to DIR_ANGLE[dir]
+  camPitch: 0,        // radians, absolute pitch (YXZ order)
+  isLooking: false,   // true while right-mouse drag in progress
 
   // Pub/sub for reactive updates
   _listeners: new Set(),

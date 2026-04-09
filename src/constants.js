@@ -5,6 +5,10 @@ export const MOVE_DURATION = 280;
 export const TURN_DURATION = 200;
 export const DOOR_ANIM_DUR = 500;
 
+// Mouse look
+export const LOOK_SENSITIVITY = 0.0035;  // radians per pixel of drag
+export const PITCH_LIMIT = Math.PI / 2 - 0.1;
+
 // Direction vectors: N, E, S, W
 export const DIR_VEC = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 export const DIR_ANGLE = [0, Math.PI * 1.5, Math.PI, Math.PI * 0.5];

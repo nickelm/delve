@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import DUNGEON from './dungeon.js';
 import {
   CELL_SIZE, DEFAULT_CEILING, MOVE_DURATION, TURN_DURATION, DOOR_ANIM_DUR,
-  DIR_VEC, DIR_ANGLE, WALL_DIR_MAP,
+  DIR_VEC, DIR_ANGLE, WALL_DIR_MAP, LOOK_SENSITIVITY, PITCH_LIMIT,
 } from './constants.js';
 import {
   ROWS, COLS, getCell, isPassable, isPit, cellWorldPos, getFloorHeightAt,
@@ -67,6 +67,36 @@ export default function App() {
     camera.rotation.y = DIR_ANGLE[gs.dir];
     gs.camera = camera;
     gs.raycaster = new THREE.Raycaster();
+
+    // HUD chevron — child of camera, always visible at bottom-center of view.
+    // Rotates in screen plane (around camera-local Z) to indicate where party
+    // forward is relative to the current camera look direction.
+    {
+      const chevGeo = new THREE.BufferGeometry();
+      chevGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+         0.000,  0.060, 0.0,
+        -0.040, -0.030, 0.0,
+         0.000, -0.010, 0.0,
+         0.000,  0.060, 0.0,
+         0.000, -0.010, 0.0,
+         0.040, -0.030, 0.0,
+      ]), 3));
+      const chevMat = new THREE.MeshBasicMaterial({
+        color: 0xffd060,
+        depthTest: false,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.92,
+      });
+      const chevron = new THREE.Mesh(chevGeo, chevMat);
+      // Position is updated each frame in the animate loop based on camera aspect
+      // so it stays at the bottom-left corner regardless of viewport size.
+      chevron.position.set(0, 0, -1);
+      chevron.renderOrder = 999;
+      camera.add(chevron);
+      scene.add(camera);
+      gs.hudChevron = chevron;
+    }
 
     scene.add(new THREE.AmbientLight(0x111122, 0.12));
 
@@ -197,6 +227,19 @@ export default function App() {
       if (gs.torchLight) {
         gs.torchLight.intensity = 3.5 + Math.sin(time * 0.01) * 0.4 + Math.sin(time * 0.023) * 0.3;
       }
+      // HUD chevron points toward party-forward in screen space.
+      // When the user drags right, camYawOffset becomes negative (camera yaws right
+      // in Three.js Y), and party-forward sits to the LEFT of the view — so the
+      // chevron rotates CCW (positive Z) by abs(offset). Hence negate.
+      if (gs.hudChevron) {
+        gs.hudChevron.rotation.z = -(gs.camYawOffset || 0);
+        // Anchor to bottom-left of the viewport at z=-1.
+        const halfH = Math.tan((camera.fov * Math.PI / 180) / 2);
+        const halfW = halfH * camera.aspect;
+        const pad = 0.10;
+        gs.hudChevron.position.x = -halfW + pad;
+        gs.hudChevron.position.y = -halfH + pad;
+      }
       for (const inst of gs.itemInstances) {
         if (inst.type === 'torch' && inst.light) {
           inst.light.intensity = 1.5 + Math.sin(time * 0.012 + Math.random() * 0.01) * 0.3;
@@ -211,12 +254,12 @@ export default function App() {
     gs.animationId = requestAnimationFrame(animate);
 
     // Door click/tap
-    const onClick = (e) => {
+    const tryDoorClick = (clientX, clientY) => {
       if (gs.dead) return;
       const rect = renderer.domElement.getBoundingClientRect();
       const mouse = new THREE.Vector2(
-        ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
       );
       gs.raycaster.setFromCamera(mouse, camera);
       gs.raycaster.far = 4;
@@ -229,11 +272,74 @@ export default function App() {
         }
       }
     };
-    renderer.domElement.addEventListener('click', onClick);
+
+    // Right-click drag = free-look. Track drag distance to suppress stray clicks.
+    let lookLastX = 0, lookLastY = 0, lookMoved = 0;
+    let leftDownX = 0, leftDownY = 0, leftMoved = 0, leftDown = false;
+
+    const onContextMenu = (e) => e.preventDefault();
+
+    const onPointerDown = (e) => {
+      if (gs.dead) return;
+      if (e.button === 2) {
+        gs.isLooking = true;
+        lookLastX = e.clientX;
+        lookLastY = e.clientY;
+        lookMoved = 0;
+        try { renderer.domElement.setPointerCapture(e.pointerId); } catch {}
+        e.preventDefault();
+      } else if (e.button === 0) {
+        leftDown = true;
+        leftDownX = e.clientX;
+        leftDownY = e.clientY;
+        leftMoved = 0;
+      }
+    };
+
+    const onPointerMove = (e) => {
+      if (gs.isLooking) {
+        const dx = e.clientX - lookLastX;
+        const dy = e.clientY - lookLastY;
+        lookLastX = e.clientX;
+        lookLastY = e.clientY;
+        lookMoved += Math.abs(dx) + Math.abs(dy);
+        gs.camYawOffset -= dx * LOOK_SENSITIVITY;
+        gs.camPitch -= dy * LOOK_SENSITIVITY;
+        if (gs.camPitch > PITCH_LIMIT) gs.camPitch = PITCH_LIMIT;
+        if (gs.camPitch < -PITCH_LIMIT) gs.camPitch = -PITCH_LIMIT;
+        // Normalize yaw offset to [-PI, PI]
+        while (gs.camYawOffset > Math.PI) gs.camYawOffset -= Math.PI * 2;
+        while (gs.camYawOffset < -Math.PI) gs.camYawOffset += Math.PI * 2;
+        // Apply immediately when not animating; during a move, the step()
+        // function reads gs.camYawOffset / gs.camPitch directly each frame.
+        if (!gs.animating) {
+          camera.rotation.y = DIR_ANGLE[gs.dir] + gs.camYawOffset;
+          camera.rotation.x = gs.camPitch;
+        }
+      } else if (leftDown) {
+        leftMoved += Math.abs(e.clientX - leftDownX) + Math.abs(e.clientY - leftDownY);
+      }
+    };
+
+    const onPointerUp = (e) => {
+      if (e.button === 2 && gs.isLooking) {
+        gs.isLooking = false;
+        try { renderer.domElement.releasePointerCapture(e.pointerId); } catch {}
+      } else if (e.button === 0 && leftDown) {
+        leftDown = false;
+        if (leftMoved < 4) tryDoorClick(e.clientX, e.clientY);
+      }
+    };
+
+    renderer.domElement.addEventListener('contextmenu', onContextMenu);
+    renderer.domElement.addEventListener('pointerdown', onPointerDown);
+    renderer.domElement.addEventListener('pointermove', onPointerMove);
+    renderer.domElement.addEventListener('pointerup', onPointerUp);
+    renderer.domElement.addEventListener('pointercancel', onPointerUp);
     renderer.domElement.addEventListener('touchend', (e) => {
       if (e.changedTouches.length === 1) {
         const t = e.changedTouches[0];
-        onClick({ clientX: t.clientX, clientY: t.clientY });
+        tryDoorClick(t.clientX, t.clientY);
       }
     });
 
@@ -376,11 +482,14 @@ export default function App() {
     const dur = isTurn ? TURN_DURATION : MOVE_DURATION;
     gs.moveStartTime = performance.now();
     gs.moveDuration = dur;
+    const prevDir = gs.dir;
     gs.px = tx; gs.pz = tz; gs.dir = td;
 
     const camera = gs.camera, torch = gs.torchLight;
     const sp = camera.position.clone();
-    const sr = camera.rotation.y;
+    // Use party-direction component (not camera.rotation.y, which includes free-look offset)
+    // so the shortest-arc turn isn't fooled by an off-axis look.
+    const sr = DIR_ANGLE[prevDir];
     const [twx, twz] = cellWorldPos(tx, tz);
     const targetFH = getFloorHeightAt(tx, tz);
     const ep = new THREE.Vector3(twx, targetFH + 1.4, twz);
@@ -389,16 +498,29 @@ export default function App() {
     while (rd > Math.PI) rd -= Math.PI * 2;
     while (rd < -Math.PI) rd += Math.PI * 2;
 
+    // Capture starting yaw offset; lerp it to zero only when turning
+    // (so the camera realigns with the new party direction).
+    // Pitch is preserved across all movement and turns.
+    const startYawOffset = gs.camYawOffset;
+    const yawDecays = isTurn;
+
     const t0 = performance.now();
 
     function step(now) {
       const t = Math.min((now - t0) / dur, 1);
       const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
       camera.position.lerpVectors(sp, ep, ease);
-      camera.rotation.y = sr + rd * ease;
+      if (yawDecays) {
+        gs.camYawOffset = startYawOffset * (1 - ease);
+      }
+      camera.rotation.y = sr + rd * ease + gs.camYawOffset;
+      camera.rotation.x = gs.camPitch;
       torch.position.set(camera.position.x, camera.position.y + 0.4, camera.position.z);
       if (t < 1) requestAnimationFrame(step);
       else {
+        if (yawDecays) gs.camYawOffset = 0;
+        camera.rotation.y = DIR_ANGLE[td] + gs.camYawOffset;
+        camera.rotation.x = gs.camPitch;
         revealRoom(tx, tz, gs.visited);
         gs.animating = false;
         gameState.notify();
@@ -421,6 +543,34 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [doMove]);
+
+  const doResetView = useCallback(() => {
+    const gs = gameState;
+    if (!gs.camera || gs.dead || gs.animating) return;
+    if (gs.camYawOffset === 0 && gs.camPitch === 0) return;
+    const camera = gs.camera;
+    const startYaw = gs.camYawOffset;
+    const startPitch = gs.camPitch;
+    const t0 = performance.now();
+    const dur = TURN_DURATION;
+    function step(now) {
+      const t = Math.min((now - t0) / dur, 1);
+      const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      gs.camYawOffset = startYaw * (1 - ease);
+      gs.camPitch = startPitch * (1 - ease);
+      camera.rotation.y = DIR_ANGLE[gs.dir] + gs.camYawOffset;
+      camera.rotation.x = gs.camPitch;
+      if (parchmentMapRef.current) parchmentMapRef.current.dirty = true;
+      if (t < 1) requestAnimationFrame(step);
+      else {
+        gs.camYawOffset = 0;
+        gs.camPitch = 0;
+        camera.rotation.y = DIR_ANGLE[gs.dir];
+        camera.rotation.x = 0;
+      }
+    }
+    requestAnimationFrame(step);
+  }, []);
 
   const restart = useCallback(() => window.location.reload(), []);
 
@@ -466,9 +616,9 @@ export default function App() {
       <FloatingPanel
         title="Navigate"
         defaultX={vw - 192}
-        defaultY={vh - PARTY_BAR_H - 210}
+        defaultY={vh - PARTY_BAR_H - 262}
         defaultWidth={178}
-        defaultHeight={138}
+        defaultHeight={190}
         resizable={false}
         alwaysOnTop
       >
@@ -479,6 +629,18 @@ export default function App() {
           <DPadBtn label="&#x25C0;" action="strafeLeft" style={{ left: 4, top: 56 }} />
           <DPadBtn label="&#x25B6;" action="strafeRight" style={{ right: 4, top: 56 }} />
           <DPadBtn label="&#x25BC;" action="back" style={{ left: 62, top: 56 }} />
+          <button
+            onPointerDown={(e) => { e.preventDefault(); doResetView(); }}
+            title="Reset view"
+            style={{
+              position: 'absolute', left: 62, top: 108, width: 48, height: 48,
+              background: t.btnBg, border: `1px solid ${t.btnBorder}`,
+              borderRadius: 8, color: t.btnColor, fontSize: 20, fontFamily: 'monospace',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', touchAction: 'none',
+              userSelect: 'none', WebkitUserSelect: 'none',
+            }}
+          >&#x2299;</button>
         </div>
       </FloatingPanel>
 
